@@ -18,6 +18,9 @@ from torch.utils.data import Dataset, DataLoader
 import torchvision.transforms as transforms
 from torch.utils.data import  TensorDataset
 import numpy as np
+from yolo import YOLO
+import cv2
+import carla
 '''
 '''
 
@@ -314,3 +317,65 @@ def calculate_jaccard(boxes1, boxes2):
     # Return the Intersection over Union (IoU) for each box pair
     return intersection_area / union_area
 
+
+
+def augment_single_image(self, annotation_line, input_shape, hue_adjust=.1, sat_adjust=1.5, val_adjust=1.5):
+    '''Applies augmentations to image, expand training set.'''
+    height, width = input_shape
+    image_data = []
+    box_data = []
+    # get images and boxes
+    line_content = annotation_line.split()
+    image = Image.open(line_content[0]).convert("RGB")
+    original_width, original_height = image.size
+    boxes = np.array([np.array(list(map(int, box.split(',')))) for box in line_content[1:]])
+    
+    # Random horizontal flip
+    if np.random.rand() < 0.5 and len(boxes) > 0:
+        image = image.transpose(Image.FLIP_LEFT_RIGHT)
+        boxes[:, [0, 2]] = original_width - boxes[:, [2, 0]]
+    # Random rotation (-15 and 15 deg)
+    angle = np.random.uniform(-15, 15)
+    image = image.rotate(angle, expand=True)
+    # Random scaling
+    scaling_factor = np.random.uniform(0.8, 1.2)
+    new_width = int(original_width * scaling_factor)
+    new_height = int(original_height * scaling_factor)
+    image = image.resize((new_width, new_height), Image.BICUBIC)
+    # Adjust bounding boxes 
+    if len(boxes) > 0:
+        boxes[:, [0, 2]] = boxes[:, [0, 2]] * new_width / original_width
+        boxes[:, [1, 3]] = boxes[:, [1, 3]] * new_height / original_height
+    # Random color distortion
+    hue_shift = np.random.uniform(-hue_adjust, hue_adjust)
+    sat_scale = np.random.uniform(1, sat_adjust) if np.random.rand() < 0.5 else 1 / np.random.uniform(1, sat_adjust)
+    val_scale = np.random.uniform(1, val_adjust) if np.random.rand() < 0.5 else 1 / np.random.uniform(1, val_adjust)
+    # Convert
+    hsv_image = rgb_to_hsv(np.array(image) / 255.0)
+    hsv_image[..., 0] = (hsv_image[..., 0] + hue_shift) % 1.0
+    hsv_image[..., 1] *= sat_scale
+    hsv_image[..., 2] *= val_scale
+    hsv_image = np.clip(hsv_image, 0, 1)
+    augmented_image = Image.fromarray((hsv_to_rgb(hsv_image) * 255).astype(np.uint8))
+    # Adjust bounding boxes to fit dimensions
+    if len(boxes) > 0:
+        boxes[:, [0, 2]] = np.clip(boxes[:, [0, 2]], 0, new_width)
+        boxes[:, [1, 3]] = np.clip(boxes[:, [1, 3]], 0, new_height)
+
+    return augmented_image, boxes
+
+
+
+def process_rgb_image(image_data, tag):
+    image_array = np.array(image_data.raw_data)
+    reshaped_img = image_array.reshape((480, 360, 4))
+    img_rgb = reshaped_img[:, :, :3]
+    # Convert image to PIL format and run YOLO 
+    image_pil = Image.fromarray(cv2.cvtColor(img_rgb, cv2.COLOR_BGR2RGB))
+    detected_img = yolo.detect_image(image_pil)
+    img_rgb_with_obj = cv2.cvtColor(np.asarray(detected_img), cv2.COLOR_RGB2BGR)
+    cv2.imshow(tag, img_rgb)
+    cv2.imshow('Detected Objects', img_rgb_with_obj)
+    cv2.waitKey(1)
+
+    return img_rgb / 255.0
